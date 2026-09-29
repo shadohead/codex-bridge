@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+// Stand-in for the `codex` binary: `app-server --listen unix://PATH` runs the fake daemon;
+// `app-server daemon start` fails like a Codex without the standalone install.
+import { runFakeCodex } from "./fake-daemon.mjs";
+
+await runFakeCodex(process.argv);

@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+import { main } from "../src/cli.mjs";
+
+// `codexctl ... | head` must not crash with EPIPE.
+process.stdout.on("error", (e) => {
+  if (e.code === "EPIPE") process.exit(0);
+});
+
+// Flush both streams before exiting so piped output is never truncated.
+const flush = (stream) => new Promise((resolve) => stream.write("", resolve));
+
+main(process.argv.slice(2)).then(
+  async (code) => {
+    await Promise.all([flush(process.stdout), flush(process.stderr)]);
+    process.exit(code ?? 0);
+  },
+  async (e) => {
+    process.stderr.write(`codexctl: fatal: ${e?.stack ?? e}\n`);
+    await flush(process.stderr);
+    process.exit(1);
+  },
+);
