@@ -106,7 +106,7 @@ test("approval: wait exits 3 and shows the request; approve unblocks; deny decli
 });
 
 test("matching command rules auto-approve with a plain accept and persist across processes", async () => {
-  const r = await start("auto-command", "APPROVE command", ["--approval", "on-request", "--auto-approve", "^/bin/zsh -lc 'touch approved\\.txt'$"]);
+  const r = await start("auto-command", "APPROVE command", ["--approval", "on-request", "--auto-approve", "^touch approved\\.txt$"]);
   assert.equal(r.code, 0, r.stderr);
   const w = await env.run(["wait", "auto-command", "--timeout", "10"]);
   assert.equal(w.code, 0, w.stdout + w.stderr);
@@ -115,7 +115,7 @@ test("matching command rules auto-approve with a plain accept and persist across
   const response = env.daemon.state.requests.filter((x) => x.method === "response").at(-1);
   assert.deepEqual(response.result, { decision: "accept" });
   const status = await env.run(["status", "auto-command", "--json"]);
-  assert.deepEqual(status.json().autoApprove, ["^/bin/zsh -lc 'touch approved\\.txt'$"]);
+  assert.deepEqual(status.json().autoApprove, ["^touch approved\\.txt$"]);
   assert.equal(status.json().autoApprovals.length, 1);
   const log = await env.run(["log", "auto-command"]);
   assert.match(log.stdout, /auto-approved request/);

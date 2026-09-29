@@ -103,10 +103,20 @@ function filePaths(rec, inflight) {
   return Array.isArray(paths) && paths.length && paths.every((x) => typeof x === 'string' && x.length) ? paths : null;
 }
 
+// Newer Codex servers send the command wrapped in its login shell, `/bin/zsh -lc '<script>'`. Rules are written
+// against the script itself, so unwrap one level of that form. Only a single-quoted script with no quote inside is
+// unwrapped (nothing to escape, so the inner text is exactly what the shell runs); anything else stays wrapped and so
+// matches no rule anchored on the script.
+function unwrapShell(command) {
+  const m = /^(?:\/bin\/|\/usr\/bin\/)?(?:zsh|bash|sh) -l?c '([^']*)'$/.exec(command);
+  return m ? m[1] : command;
+}
+
 function matchingAutoApproval(rec, agent, inflight) {
   if (rec.method === 'item/commandExecution/requestApproval' || rec.method === 'execCommandApproval') {
-    const command = rec.params?.command;
-    if (typeof command !== 'string' || !command.length) return null;
+    const raw = rec.params?.command;
+    if (typeof raw !== 'string' || !raw.length) return null;
+    const command = unwrapShell(raw);
     return (agent.autoApprove ?? []).some((r) => new RegExp(r).test(command)) ? { detail: command } : null;
   }
   if (rec.method === 'item/fileChange/requestApproval' || rec.method === 'applyPatchApproval') {
