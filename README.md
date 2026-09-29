@@ -37,13 +37,16 @@ The exit code says what happened, the output says why.
 
 | command | what it does |
 | --- | --- |
-| `start --name NAME [--model M] [--effort low\|medium\|high\|xhigh] [--cwd DIR] [--sandbox read-only\|workspace-write] [--writable-root DIR ...] [--network] [--approval never\|on-request] (PROMPT \| --prompt-file F \| -)` | Creates a thread named NAME, starts its first turn, returns immediately with the thread id. Defaults: workspace-write sandbox, approval `never`, model and effort from your Codex config. |
+| `start --name NAME [--model M] [--effort low\|medium\|high\|xhigh] [--cwd DIR] [--sandbox read-only\|workspace-write] [--writable-root DIR ...] [--network] [--approval never\|on-request] [--auto-approve REGEX ...] [--auto-approve-files REGEX ...] (PROMPT \| --prompt-file F \| -)` | Creates a thread named NAME, starts its first turn, returns immediately with the thread id. Defaults: workspace-write sandbox, approval `never`, model and effort from your Codex config. |
 | `send NAME (MESSAGE \| --file F \| -)` | If a turn is running the message is steered into it (`turn/steer`). Otherwise a new turn starts. Returns immediately. Use `--` before a message that starts with dashes. |
 | `status [NAME]` | Without NAME a table of all agents. With NAME: state, turn elapsed time, thread and settings, token usage, the last items (commands with exit codes, patched files, agent messages), the in-flight command when a `wait` is attached, and any pending approval. |
 | `log NAME [--since CURSOR] [--full]` | Transcript events (turns, messages, commands, patches). Prints a cursor at the end; pass it as `--since` to see only newer events. `--full` shows complete messages, command output and diffs. |
 | `wait NAME [--timeout SEC] [--until turn-complete\|any-message\|approval]` | Blocks until the condition holds, then prints the final (or new) agent message and a summary. |
 | `result NAME` | The final message of the last completed turn. |
 | `approve NAME [--deny] [--id REQ] [--for-session] [--answer TEXT]` | Answers the oldest pending approval (or `--id`). `--deny` declines. `--answer` answers an agent question raised through `request_user_input`. |
+| `auto NAME add REGEX [--files]` | Adds a command rule, or a file path rule with `--files`. |
+| `auto NAME rm REGEX [--files]` | Removes the exact rule. |
+| `auto NAME list` | Lists both sets of rules. |
 | `interrupt NAME` | Stops the running turn and waits until it has really stopped. Idempotent. |
 | `resume NAME` | Reloads the thread on the daemon after a restart (settings from the registry are re-applied). `send` does this automatically. |
 | `list` | Registered agents. |
@@ -53,6 +56,14 @@ The exit code says what happened, the output says why.
 
 Every command accepts `--json`.
 Errors are then `{"error": "..."}` on stdout, with the message also on stderr.
+
+Command rules match the full command string sent by the daemon, including any shell wrapper.
+File rules apply only when every changed path is known and one rule matches every path.
+`wait` automatically accepts a matching request for that request only, prints a short line, records the decision in the registry, and keeps waiting.
+An unmatched request still exits with code 3.
+MCP elicitations, permission requests, and `request_user_input` are never auto-approved.
+Use `codexctl status NAME` for recent automatic approvals and `codexctl log NAME` for the recorded list.
+For example, `codexctl start --name builder --approval on-request --auto-approve 'blender.*--background' --auto-approve-files '^/tmp/build/' 'Build the model.'` stores both rules with the agent.
 
 ### `wait` exit codes
 
@@ -80,7 +91,7 @@ Claude agent --- codexctl (short-lived process, no state of its own beyond a reg
 **Shared daemon, stateless CLI.**
 Threads live in the daemon and their history lives in Codex's rollout files.
 Every `codexctl` call connects, asks the daemon for the truth (`thread/read`, `thread/turns/list`) and disconnects.
-The only local state is `~/.codex-bridge/agents.json`: name, thread id, the settings the agent was created with, and the id of the last turn we started or steered.
+The only local state is `~/.codex-bridge/agents.json`: name, thread id, settings, auto-approval rules and recent decisions, and the id of the last turn we started or steered.
 There is no per-agent host process to babysit, and any number of `codexctl` processes can run at once.
 
 **Transport.**
@@ -114,6 +125,7 @@ A blocked turn stays blocked with no client attached.
 When any connection calls `thread/resume` on the running thread, the daemon replays the pending request with its original id.
 `wait` (exit 3), `status` and `approve` use that, so approving works from a fresh process, and works even if the caller was restarted in between.
 `approve` answers command, file-change, permission, MCP-elicitation and `request_user_input` requests (see Limitations for which are verified).
+`wait` checks command and file-change rules from the registry before returning a pending approval.
 
 **Live view.**
 The daemon's read APIs only return completed items, so an in-flight command is invisible to a stateless `status`.
@@ -139,7 +151,7 @@ The cursor is `<events seen>.<hash of the last seen event id>`, so it is cheap t
 
 | path | content |
 | --- | --- |
-| `~/.codex-bridge/agents.json` | name to thread id plus settings (model, effort, cwd, sandbox, writable roots, network, approval, last turn id). Written atomically under a lock. |
+| `~/.codex-bridge/agents.json` | name to thread id plus settings, auto-approval rules, recent auto-approvals and last turn id. Written atomically under a lock. |
 | `~/.codex-bridge/daemon.log`, `daemon.pid` | only when `codexctl` started the daemon. |
 | `~/.codex-bridge/live/NAME.json` | live view mirrored by an attached `wait`. |
 | `~/.codex-bridge/locks/` | registry, per-agent and daemon-start locks (stale locks from dead processes are broken). |
@@ -149,7 +161,7 @@ Environment overrides (mostly for tests): `CODEXCTL_HOME`, `CODEXCTL_SOCKET`, `C
 ## Tests
 
 ```sh
-npm test          # 30 tests, offline: unit tests plus the real CLI against a scripted fake daemon (test/fake-daemon.mjs)
+npm test          # offline: unit tests plus the real CLI against a scripted fake daemon (test/fake-daemon.mjs)
 npm run lint      # node --check on every file
 test/e2e-real.sh  # the end-to-end run below, against the real Codex (spends a few tokens)
 ```

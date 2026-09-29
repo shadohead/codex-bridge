@@ -28,7 +28,8 @@ usage: codexctl <command> [options]
 
   start --name NAME [--model M] [--effort low|medium|high|xhigh] [--cwd DIR]
         [--sandbox read-only|workspace-write] [--writable-root DIR ...] [--network]
-        [--approval never|on-request] (PROMPT | --prompt-file F | -)
+        [--approval never|on-request] [--auto-approve REGEX ...] [--auto-approve-files REGEX ...]
+        (PROMPT | --prompt-file F | -)
                                  create an agent and start its first turn (returns immediately)
   send NAME (MESSAGE | --file F | -)   steer the running turn, or start a new turn if idle
   status [NAME]                  one agent in detail, or a table of all agents
@@ -37,6 +38,7 @@ usage: codexctl <command> [options]
                                  block; exit 0 done, 2 timeout, 3 approval/question pending, 1 error
   result NAME                    final message of the last completed turn
   approve NAME [--deny] [--id REQ] [--for-session] [--answer TEXT]
+  auto NAME [add REGEX|rm REGEX|list] [--files]   manage per-agent approval rules
   interrupt NAME
   resume NAME                    reload the thread after a daemon restart
   list                           registered agents
@@ -61,6 +63,8 @@ const COMMANDS = {
       "writable-root": { type: "list" },
       network: { type: "bool" },
       approval: { type: "string" },
+      "auto-approve": { type: "list" },
+      "auto-approve-files": { type: "list" },
       "prompt-file": { type: "string" },
     },
   },
@@ -72,6 +76,7 @@ const COMMANDS = {
   approve: {
     flags: { deny: { type: "bool" }, id: { type: "string" }, "for-session": { type: "bool" }, answer: { type: "string" } },
   },
+  auto: { flags: { files: { type: "bool" } } },
   interrupt: { flags: {} },
   resume: { flags: {} },
   list: { flags: {} },
@@ -182,6 +187,9 @@ function snapJson(snap) {
     updatedAt: snap.thread?.updatedAt ?? null,
     recent: snap.turns ? recentItemLines(snap.turns, 6) : [],
     pending: (snap.pending ?? []).map((r) => ({ id: r.id, kind: r.kind, method: r.method, params: r.params })),
+    autoApprove: snap.autoApprove ?? [],
+    autoApproveFiles: snap.autoApproveFiles ?? [],
+    autoApprovals: snap.autoApprovals ?? [],
   };
 }
 
@@ -199,6 +207,8 @@ async function cmdStart({ flags, positionals }, json) {
     writableRoots: flags["writable-root"],
     network: flags.network,
     approval: flags.approval,
+    autoApprove: flags["auto-approve"],
+    autoApproveFiles: flags["auto-approve-files"],
   });
   if (json) return printJson(r);
   out(`started agent "${r.name}"  thread ${r.threadId}  turn ${shortId(r.turnId)}`);
@@ -245,6 +255,8 @@ async function cmdStatus({ positionals }, json) {
   if (json) return printJson(snapJson(s));
   if (s.error) {
     out(`${s.name}  error  ${s.error}`);
+    out(`auto-approve commands: ${(s.autoApprove ?? []).length ? s.autoApprove.join(', ') : '(none)'}`);
+    out(`auto-approve files: ${(s.autoApproveFiles ?? []).length ? s.autoApproveFiles.join(', ') : '(none)'}`);
     return;
   }
   const running = s.state === "running" || s.state.startsWith("waiting");
@@ -256,6 +268,12 @@ async function cmdStatus({ positionals }, json) {
   out(
     `thread ${s.threadId}  ${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}  sandbox ${s.settings.sandbox}  approval ${s.settings.approval}  cwd ${shortPath(s.settings.cwd, 60)}`,
   );
+  out(`auto-approve commands: ${(s.autoApprove ?? []).length ? s.autoApprove.join(', ') : '(none)'}`);
+  out(`auto-approve files: ${(s.autoApproveFiles ?? []).length ? s.autoApproveFiles.join(', ') : '(none)'}`);
+  if (s.autoApprovals?.length) {
+    out('recent auto-approvals:');
+    for (const a of s.autoApprovals) out(`  auto-approved request ${a.id} (${a.kind}): ${oneLine(a.detail, 140)}`);
+  }
   const tl = tokensLine(s.usage);
   if (tl) out(tl);
   if (s.turn) out(`this turn: ${summaryLine(s.turn)}`);
@@ -302,6 +320,7 @@ async function cmdLog({ flags, positionals }, json) {
         text: renderEvent(e, { full: flags.full }).join("\n"),
         item: flags.full ? e.item : undefined,
       })),
+      autoApprovals: r.autoApprovals,
     });
   }
   out(`# ${r.name}  state=${r.state}${r.note ? `  (${r.note})` : ""}`);
@@ -313,6 +332,10 @@ async function cmdLog({ flags, positionals }, json) {
     }
   }
   if (!shown) out("(no new events)");
+  if (r.autoApprovals.length) {
+    out('auto-approvals:');
+    for (const a of r.autoApprovals) out(`  auto-approved request ${a.id} (${a.kind}): ${oneLine(a.detail, 140)}`);
+  }
   out(`cursor: ${r.cursor}   next: codexctl log ${r.name} --since ${r.cursor}`);
 }
 
@@ -330,7 +353,7 @@ function waitExit(r) {
 async function cmdWait({ flags, positionals }, json) {
   const [name] = positionals;
   if (!name) throw new UsageError("usage: codexctl wait NAME [--timeout SEC] [--until turn-complete|any-message|approval]");
-  const r = await ops.waitFor(name, { timeoutSec: flags.timeout ?? 0, until: flags.until ?? "turn-complete" });
+  const r = await ops.waitFor(name, { timeoutSec: flags.timeout ?? 0, until: flags.until ?? "turn-complete", onAutoApprove: json ? () => {} : (a) => out(`auto-approved request ${a.id} (${a.kind}): ${oneLine(a.detail, 140)}`) });
   const code = waitExit(r);
   if (json) {
     printJson({
@@ -346,6 +369,7 @@ async function cmdWait({ flags, positionals }, json) {
       summary: r.summary ?? null,
       pending: (r.pending ?? []).map((p) => ({ id: p.id, kind: p.kind, method: p.method, params: p.params })),
       usage: r.usage ?? null,
+      autoApprovals: r.autoApprovals ?? [],
     });
     return code;
   }
@@ -448,6 +472,19 @@ async function cmdApprove({ flags, positionals }, json) {
   return 0;
 }
 
+async function cmdAuto({ flags, positionals }, json) {
+  const [name, action = 'list', pattern, ...extra] = positionals;
+  if (!name || extra.length) throw new UsageError('usage: codexctl auto NAME [add REGEX|rm REGEX|list] [--files]');
+  const r = await ops.autoRules(name, action, pattern, !!flags.files);
+  if (json) return printJson(r);
+  out(`${name} auto-approve commands:`);
+  for (const rule of r.command) out(`  ${rule}`);
+  if (!r.command.length) out('  (none)');
+  out(`${name} auto-approve files:`);
+  for (const rule of r.files) out(`  ${rule}`);
+  if (!r.files.length) out('  (none)');
+}
+
 async function cmdInterrupt({ positionals }, json) {
   const [name] = positionals;
   if (!name) throw new UsageError("usage: codexctl interrupt NAME");
@@ -548,6 +585,7 @@ const HANDLERS = {
   wait: cmdWait,
   result: cmdResult,
   approve: cmdApprove,
+  auto: cmdAuto,
   interrupt: cmdInterrupt,
   resume: cmdResume,
   list: cmdList,

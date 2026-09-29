@@ -61,6 +61,71 @@ export function requireAgent(name) {
   return a;
 }
 
+function validateRegex(pattern) {
+  try {
+    new RegExp(pattern);
+  } catch (e) {
+    throw new UsageError(`invalid regex ${JSON.stringify(pattern)}: ${e.message}`);
+  }
+  return pattern;
+}
+
+export async function autoRules(name, action = "list", pattern = null, files = false) {
+  if (!['add', 'rm', 'list'].includes(action)) throw new UsageError('usage: codexctl auto NAME [add REGEX|rm REGEX|list] [--files]');
+  if (action === 'list') {
+    if (pattern != null) throw new UsageError('usage: codexctl auto NAME list');
+    const a = requireAgent(name);
+    return { name, command: a.autoApprove ?? [], files: a.autoApproveFiles ?? [] };
+  }
+  if (pattern == null) throw new UsageError(`usage: codexctl auto NAME ${action} REGEX [--files]`);
+  if (action === 'add') validateRegex(pattern);
+  const key = files ? 'autoApproveFiles' : 'autoApprove';
+  return updateRegistry((reg) => {
+    const a = reg.agents[name];
+    if (!a) throw new UsageError(`no such agent: ${name}`);
+    const rules = a[key] ?? [];
+    a[key] = action === 'add' ? [...new Set([...rules, pattern])] : rules.filter((r) => r !== pattern);
+    return { name, command: a.autoApprove ?? [], files: a.autoApproveFiles ?? [] };
+  });
+}
+
+function filePaths(rec, inflight) {
+  const p = rec.params ?? {};
+  const item = inflight.find((x) => x.id === rec.itemId && x.type === 'fileChange');
+  const changes = p.changes ?? p.fileChanges;
+  if (Array.isArray(changes) && changes.some((x) => typeof x !== 'string' && !x?.path)) return null;
+  const paths = [
+    ...(Array.isArray(changes) ? changes.flatMap((x) => typeof x === 'string' ? [x] : [x?.path, x?.kind?.move_path].filter(Boolean)) : []),
+    ...(Array.isArray(p.paths) ? p.paths : []),
+    ...(item?.files ?? []),
+  ];
+  // No path list means the scope of the change is unknown, so never approve it.
+  return Array.isArray(paths) && paths.length && paths.every((x) => typeof x === 'string' && x.length) ? paths : null;
+}
+
+function matchingAutoApproval(rec, agent, inflight) {
+  if (rec.method === 'item/commandExecution/requestApproval' || rec.method === 'execCommandApproval') {
+    const command = rec.params?.command;
+    if (typeof command !== 'string' || !command.length) return null;
+    return (agent.autoApprove ?? []).some((r) => new RegExp(r).test(command)) ? { detail: command } : null;
+  }
+  if (rec.method === 'item/fileChange/requestApproval' || rec.method === 'applyPatchApproval') {
+    const paths = filePaths(rec, inflight);
+    if (!paths) return null;
+    return (agent.autoApproveFiles ?? []).some((r) => paths.every((p) => new RegExp(r).test(p))) ? { detail: paths.join(', '), paths } : null;
+  }
+  return null;
+}
+
+async function recordAutoApproval(name, rec, detail, paths) {
+  const entry = { id: rec.id, kind: rec.kind, turnId: rec.turnId, detail, ...(paths ? { paths } : {}), at: Date.now() };
+  await updateRegistry((reg) => {
+    const a = reg.agents[name];
+    if (a) a.autoApprovals = [...(a.autoApprovals ?? []), entry].slice(-20);
+  });
+  return entry;
+}
+
 // ---- settings -----------------------------------------------------------
 
 export function sandboxPolicy(a) {
@@ -106,6 +171,7 @@ export async function startAgent(o) {
   if ((o.writableRoots ?? []).length && (o.sandbox ?? "workspace-write") !== "workspace-write") {
     throw new UsageError("--writable-root only applies to --sandbox workspace-write");
   }
+  for (const pattern of [...(o.autoApprove ?? []), ...(o.autoApproveFiles ?? [])]) validateRegex(pattern);
   const cwd = path.resolve(o.cwd ?? process.cwd());
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new UsageError(`--cwd is not a directory: ${cwd}`);
   const settings = {
@@ -145,6 +211,9 @@ export async function startAgent(o) {
       createdAt: Date.now(),
       lastTurnId: null,
       lastSendAt: null,
+      autoApprove: [...new Set(o.autoApprove ?? [])],
+      autoApproveFiles: [...new Set(o.autoApproveFiles ?? [])],
+      autoApprovals: [],
     };
     try {
       await updateRegistry((reg) => {
@@ -182,11 +251,14 @@ export async function startAgent(o) {
 
 /** Gather everything status/list/wait need for one agent, tolerating a missing thread. */
 export async function snapshotAgent(bridge, agent, { recentTurns = 3, usage = true } = {}) {
-  const snap = { name: agent.name, threadId: agent.threadId, settings: pickSettings(agent) };
+  const snap = { name: agent.name, threadId: agent.threadId, settings: pickSettings(agent), autoApprove: agent.autoApprove ?? [], autoApproveFiles: agent.autoApproveFiles ?? [], autoApprovals: (agent.autoApprovals ?? []).slice(-5) };
   try {
     const thread = await bridge.readThread(agent.threadId);
     const turns = await bridge.recentTurns(agent.threadId, recentTurns);
     const fresh = getAgent(agent.name) ?? agent;
+    snap.autoApprove = fresh.autoApprove ?? [];
+    snap.autoApproveFiles = fresh.autoApproveFiles ?? [];
+    snap.autoApprovals = (fresh.autoApprovals ?? []).slice(-5);
     const state = deriveState(thread, turns, fresh);
     const tt = targetTurn(turns, fresh);
     Object.assign(snap, {
@@ -344,7 +416,7 @@ export async function logAgent(name, { since = null } = {}) {
     const events = flattenEvents(turns);
     const { index, note } = decodeCursor(since, events);
     const state = deriveState(thread, turns, getAgent(name) ?? agent);
-    return { name, threadId: agent.threadId, state, events: events.slice(index), from: index, cursor: encodeCursor(events), note, thread };
+    return { name, threadId: agent.threadId, state, events: events.slice(index), from: index, cursor: encodeCursor(events), note, thread, autoApprovals: (getAgent(name)?.autoApprovals ?? []).slice(-20) };
   });
 }
 
@@ -397,7 +469,7 @@ const RETRYABLE = (e) => !(e instanceof RpcError) || e.code === -1 || /closed|EC
  * Block until the agent reaches the requested condition. Level-triggered: notifications only wake us up,
  * the decision is always made from a fresh read of the thread, so nothing depends on having seen live events.
  */
-export async function waitFor(name, { timeoutSec = 0, until = "turn-complete", pollMs = 3000 } = {}) {
+export async function waitFor(name, { timeoutSec = 0, until = "turn-complete", pollMs = 3000, onAutoApprove = () => {} } = {}) {
   if (!["turn-complete", "any-message", "approval"].includes(until)) {
     throw new UsageError("--until must be turn-complete, any-message or approval");
   }
@@ -409,6 +481,8 @@ export async function waitFor(name, { timeoutSec = 0, until = "turn-complete", p
   let baseline = null;
   let pendingSince = null;
   let failures = 0;
+  const autoApprovals = [];
+  const responded = new Set();
   const live = new LiveTracker(name, agent.threadId);
   const onSignal = (sig) => () => {
     live.close();
@@ -452,6 +526,7 @@ export async function waitFor(name, { timeoutSec = 0, until = "turn-complete", p
           get inflight() {
             return [...live.inflight.values()];
           },
+          autoApprovals,
         };
         failures = 0;
 
@@ -464,6 +539,23 @@ export async function waitFor(name, { timeoutSec = 0, until = "turn-complete", p
         if (state === "waiting-approval" || state === "waiting-input") {
           pendingSince ??= Date.now();
           const recs = bridge.pendingFor(agent.threadId);
+          let approved = false;
+          for (const rec of recs) {
+            const key = `${rec.turnId}#${rec.id}`;
+            if (responded.has(key)) continue;
+            const match = matchingAutoApproval(rec, getAgent(name) ?? fresh, [...live.inflight.values()]);
+            if (!match) continue;
+            bridge.client.respond(rec.id, approvalResponse(rec, { deny: false, forSession: false, answer: null }));
+            responded.add(key);
+            const entry = await recordAutoApproval(name, rec, match.detail, match.paths);
+            autoApprovals.push(entry);
+            onAutoApprove(entry);
+            approved = true;
+          }
+          if (approved) {
+            await sleepOrWake(bridge, agent.threadId, 100);
+            continue;
+          }
           // Give the (replayed) request(s) a moment to arrive so the caller gets the details.
           const age = recs.length ? Date.now() - recs[0].receivedAt : 0;
           if ((recs.length && age >= 300) || Date.now() - pendingSince > 6000) {

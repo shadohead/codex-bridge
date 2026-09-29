@@ -105,6 +105,69 @@ test("approval: wait exits 3 and shows the request; approve unblocks; deny decli
   assert.match(none.stdout, /nothing to approve/);
 });
 
+test("matching command rules auto-approve with a plain accept and persist across processes", async () => {
+  const r = await start("auto-command", "APPROVE command", ["--approval", "on-request", "--auto-approve", "^/bin/zsh -lc 'touch approved\\.txt'$"]);
+  assert.equal(r.code, 0, r.stderr);
+  const w = await env.run(["wait", "auto-command", "--timeout", "10"]);
+  assert.equal(w.code, 0, w.stdout + w.stderr);
+  assert.match(w.stdout, /auto-approved request \d+ \(command\):/);
+  assert.match(w.stdout, /turn completed/);
+  const response = env.daemon.state.requests.filter((x) => x.method === "response").at(-1);
+  assert.deepEqual(response.result, { decision: "accept" });
+  const status = await env.run(["status", "auto-command", "--json"]);
+  assert.deepEqual(status.json().autoApprove, ["^/bin/zsh -lc 'touch approved\\.txt'$"]);
+  assert.equal(status.json().autoApprovals.length, 1);
+  const log = await env.run(["log", "auto-command"]);
+  assert.match(log.stdout, /auto-approved request/);
+  const reg = JSON.parse(fs.readFileSync(path.join(env.env.CODEXCTL_HOME, "agents.json"), "utf8"));
+  assert.equal(reg.agents["auto-command"].autoApprovals.length, 1);
+});
+
+test("unmatched commands still exit 3; auto add, list and rm work across processes", async () => {
+  await start("auto-edit", "APPROVE command", ["--auto-approve", "^no match$"]);
+  const list = await env.run(["auto", "auto-edit", "list", "--json"]);
+  assert.deepEqual(list.json().command, ["^no match$"]);
+  const w = await env.run(["wait", "auto-edit", "--timeout", "10"]);
+  assert.equal(w.code, 3, w.stdout + w.stderr);
+  assert.equal(env.daemon.state.requests.filter((x) => x.method === "response" && x.id === Number(w.stdout.match(/request (\d+)/)?.[1])).length, 0);
+  const add = await env.run(["auto", "auto-edit", "add", "touch approved\\.txt", "--json"]);
+  assert.deepEqual(add.json().command, ["^no match$", "touch approved\\.txt"]);
+  const rm = await env.run(["auto", "auto-edit", "rm", "^no match$", "--json"]);
+  assert.deepEqual(rm.json().command, ["touch approved\\.txt"]);
+  const w2 = await env.run(["wait", "auto-edit", "--timeout", "10", "--json"]);
+  assert.equal(w2.code, 0, w2.stdout + w2.stderr);
+  assert.equal(w2.json().autoApprovals.length, 1);
+});
+
+test("file rules require every changed path to match", async () => {
+  await start("file-safe", "FILE_SAFE", ["--auto-approve-files", "^/safe/"]);
+  const safe = await env.run(["wait", "file-safe", "--timeout", "10"]);
+  assert.equal(safe.code, 0, safe.stdout + safe.stderr);
+  assert.match(safe.stdout, /auto-approved request \d+ \(file-change\)/);
+  await start("file-mix", "FILE_MIX", ["--auto-approve-files", "^/safe/"]);
+  const mix = await env.run(["wait", "file-mix", "--timeout", "10"]);
+  assert.equal(mix.code, 3, mix.stdout + mix.stderr);
+  const added = await env.run(["auto", "file-mix", "add", "^/(safe|other)/", "--files", "--json"]);
+  assert.deepEqual(added.json().files, ["^/safe/", "^/(safe|other)/"]);
+  const finished = await env.run(["wait", "file-mix", "--timeout", "10"]);
+  assert.equal(finished.code, 0, finished.stdout + finished.stderr);
+  const removed = await env.run(["auto", "file-mix", "rm", "^/(safe|other)/", "--files", "--json"]);
+  assert.deepEqual(removed.json().files, ["^/safe/"]);
+});
+
+test("MCP elicitations are never auto-approved and invalid regexes are rejected", async () => {
+  const bad = await start("bad-rule", "FAST", ["--auto-approve", "["]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /invalid regex/);
+  await start("elicitation", "ELICIT", ["--auto-approve", ".*", "--auto-approve-files", ".*"]);
+  const w = await env.run(["wait", "elicitation", "--timeout", "10"]);
+  assert.equal(w.code, 3, w.stdout + w.stderr);
+  assert.match(w.stdout, /mcp-elicitation/);
+  const add = await env.run(["auto", "elicitation", "add", "[", "--json"]);
+  assert.equal(add.code, 1);
+  assert.match(add.json().error, /invalid regex/);
+});
+
 test("approve --id picks a request and rejects an unknown id", async () => {
   await start("ap3", "APPROVE ids");
   await env.run(["wait", "ap3", "--timeout", "10"]);

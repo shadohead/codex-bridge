@@ -88,11 +88,16 @@ export async function startFakeDaemon(sockPath, { log = () => {} } = {}) {
     } else if (/ASK/.test(text)) {
       turn.questions = [{ title: "Which color?", options: ["red", "blue"] }];
       setTimeout(() => finish(t, turn, "completed", "I need to know something."), 150);
-    } else if (/APPROVE/.test(text)) {
+    } else if (/APPROVE|FILE_|ELICIT/.test(text)) {
       setTimeout(() => {
         addItem(t, turn, { type: "agentMessage", id: uid("msg"), text: "asking permission", phase: "commentary" });
         setStatus(t, "active", ["waitingOnApproval"]);
-        const req = { id: seq++, method: "item/commandExecution/requestApproval", params: { kind: "command", threadId: t.id, turnId: turn.id, itemId: uid("exec"), command: "/bin/zsh -lc 'touch approved.txt'", cwd: t.cwd, reason: "needs write access" }, turn };
+        const files = /FILE_MIX/.test(text) ? ["/safe/one.txt", "/other/two.txt"] : ["/safe/one.txt", "/safe/two.txt"];
+        const itemId = uid("exec");
+        if (/FILE_/.test(text)) notify(t, "item/started", { threadId: t.id, turnId: turn.id, item: { id: itemId, type: "fileChange", changes: files.map((path) => ({ path })) } });
+        const method = /ELICIT/.test(text) ? "mcpServer/elicitation/request" : /FILE_/.test(text) ? "item/fileChange/requestApproval" : "item/commandExecution/requestApproval";
+        const params = { threadId: t.id, turnId: turn.id, itemId, ...(method === "item/commandExecution/requestApproval" ? { command: "/bin/zsh -lc 'touch approved.txt'", cwd: t.cwd } : method === "item/fileChange/requestApproval" ? { changes: files.map((path) => ({ path })) } : { serverName: "fake", message: "approve?" }) };
+        const req = { id: seq++, method, params, turn };
         t.pending = req;
         for (const c of conns) if (c.subs.has(t.id)) send(c, { id: req.id, method: req.method, params: req.params });
       }, 100);
