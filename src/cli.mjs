@@ -29,6 +29,7 @@ usage: codexctl <command> [options]
   start --name NAME [--model M] [--effort low|medium|high|xhigh] [--cwd DIR]
         [--sandbox read-only|workspace-write] [--writable-root DIR ...] [--network]
         [--approval never|on-request] [--auto-approve REGEX ...] [--auto-approve-files REGEX ...]
+        [--fast | --service-tier priority|default|ID]
         (PROMPT | --prompt-file F | -)
                                  create an agent and start its first turn (returns immediately)
   send NAME (MESSAGE | --file F | -)   steer the running turn, or start a new turn if idle
@@ -39,6 +40,7 @@ usage: codexctl <command> [options]
   result NAME                    final message of the last completed turn
   approve NAME [--deny] [--id REQ] [--for-session] [--answer TEXT]
   auto NAME [add REGEX|rm REGEX|list] [--files]   manage per-agent approval rules
+  tier NAME [fast|standard|ID]   show or set the service tier (applies from the agent's next new turn)
   interrupt NAME
   resume NAME                    reload the thread after a daemon restart
   list                           registered agents
@@ -66,8 +68,11 @@ const COMMANDS = {
       "auto-approve": { type: "list" },
       "auto-approve-files": { type: "list" },
       "prompt-file": { type: "string" },
+      fast: { type: "bool" },
+      "service-tier": { type: "string" },
     },
   },
+  tier: { flags: {} },
   send: { flags: { file: { type: "string", alias: "f" } } },
   status: { flags: {} },
   log: { flags: { since: { type: "string" }, full: { type: "bool" } } },
@@ -209,12 +214,14 @@ async function cmdStart({ flags, positionals }, json) {
     approval: flags.approval,
     autoApprove: flags["auto-approve"],
     autoApproveFiles: flags["auto-approve-files"],
+    serviceTier: flags.fast ? "priority" : flags["service-tier"],
   });
   if (json) return printJson(r);
   out(`started agent "${r.name}"  thread ${r.threadId}  turn ${shortId(r.turnId)}`);
   out(
     `model ${r.model ?? "default"}${r.effort ? "/" + r.effort : ""}  sandbox ${r.sandbox}${r.writableRoots?.length ? ` (+${r.writableRoots.join(",")})` : ""}${r.network ? "+network" : ""}  approval ${r.approval}  cwd ${r.cwd}`,
   );
+  if (r.serviceTier) out(`service tier ${r.serviceTier}`);
   out(`next: codexctl wait ${r.name}   |   codexctl status ${r.name}   |   codexctl send ${r.name} "..."`);
 }
 
@@ -244,7 +251,7 @@ async function cmdStatus({ positionals }, json) {
         s.name,
         stateLine(s.state),
         running ? fmtDur(turnElapsed(s.turn, s.agent)) : "-",
-        `${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}`,
+        `${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}${tierLabel(s.settings.serviceTier)}`,
         s.thread ? fmtAgo(s.thread.updatedAt) : "?",
         oneLine(last, 70),
       ];
@@ -266,7 +273,7 @@ async function cmdStatus({ positionals }, json) {
   else if (isLostTurn(s.turn)) head.push(`last turn ${turnStatusLabel(s.turn)}`);
   out(head.join("  |  "));
   out(
-    `thread ${s.threadId}  ${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}  sandbox ${s.settings.sandbox}  approval ${s.settings.approval}  cwd ${shortPath(s.settings.cwd, 60)}`,
+    `thread ${s.threadId}  ${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}${tierLabel(s.settings.serviceTier)}  sandbox ${s.settings.sandbox}  approval ${s.settings.approval}  cwd ${shortPath(s.settings.cwd, 60)}`,
   );
   out(`auto-approve commands: ${(s.autoApprove ?? []).length ? s.autoApprove.join(', ') : '(none)'}`);
   out(`auto-approve files: ${(s.autoApproveFiles ?? []).length ? s.autoApproveFiles.join(', ') : '(none)'}`);
@@ -485,6 +492,20 @@ async function cmdAuto({ flags, positionals }, json) {
   if (!r.files.length) out('  (none)');
 }
 
+function tierLabel(tier) {
+  if (!tier || tier === "default") return "";
+  return tier === "priority" ? "/fast" : "/" + tier;
+}
+
+async function cmdTier({ positionals }, json) {
+  const [name, tier, ...extra] = positionals;
+  if (!name || extra.length) throw new UsageError("usage: codexctl tier NAME [fast|standard|ID]");
+  const r = await ops.setTier(name, tier ?? null);
+  if (json) return printJson(r);
+  const label = r.serviceTier ?? "(daemon default)";
+  out(r.changed ? `${name}: service tier ${label}; applies from its next new turn` : `${name}: service tier ${label}`);
+}
+
 async function cmdInterrupt({ positionals }, json) {
   const [name] = positionals;
   if (!name) throw new UsageError("usage: codexctl interrupt NAME");
@@ -517,7 +538,7 @@ async function cmdList({}, json) {
         s.name,
         s.state,
         s.threadId,
-        `${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}`,
+        `${s.settings.model ?? "?"}${s.settings.effort ? "/" + s.settings.effort : ""}${tierLabel(s.settings.serviceTier)}`,
         `${s.settings.sandbox}/${s.settings.approval}`,
         shortPath(s.settings.cwd, 44),
       ]),
@@ -586,6 +607,7 @@ const HANDLERS = {
   result: cmdResult,
   approve: cmdApprove,
   auto: cmdAuto,
+  tier: cmdTier,
   interrupt: cmdInterrupt,
   resume: cmdResume,
   list: cmdList,

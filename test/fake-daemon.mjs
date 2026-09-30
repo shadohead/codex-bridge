@@ -112,6 +112,7 @@ export async function startFakeDaemon(sockPath, { log = () => {} } = {}) {
   const handlers = {
     initialize: () => ({ userAgent: "fake-codex/0.0.0", codexHome: "/tmp/fake", platformFamily: "unix", platformOs: "macos" }),
     "thread/start": (c, p) => {
+      state.requests.push({ method: "thread/start", params: p });
       const t = { id: uid("thr"), name: null, preview: "", cwd: p.cwd, model: p.model ?? "gpt-fake", effort: p.config?.model_reasoning_effort ?? "medium", createdAt: Math.floor(Date.now() / 1000), updatedAt: Math.floor(Date.now() / 1000), status: { type: "idle" }, loaded: true, turns: [], pending: null, archived: false };
       threads.set(t.id, t);
       c.subs.add(t.id);

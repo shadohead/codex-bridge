@@ -235,6 +235,37 @@ test("daemon restart: lost turn is labelled, send reloads the thread and re-appl
   assert.match(w2.stdout, /done: FAST after restart/);
 });
 
+test("service tier: --fast reaches thread/start and every new turn; tier switches it for the next turn", async () => {
+  const r = await start("tier1", "FAST tier one", ["--fast", "--json"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json().serviceTier, "priority");
+  const threadReq = env.daemon.state.requests.filter((q) => q.method === "thread/start").at(-1);
+  assert.equal(threadReq.params.serviceTier, "priority");
+  const firstTurn = env.daemon.state.requests.filter((q) => q.method === "turn/start").at(-1);
+  assert.equal(firstTurn.params.serviceTier, "priority");
+  await env.run(["wait", "tier1", "--timeout", "10"]);
+  const status = await env.run(["status", "tier1"]);
+  assert.match(status.stdout, /\/fast/);
+  const set = await env.run(["tier", "tier1", "standard", "--json"]);
+  assert.deepEqual(set.json(), { name: "tier1", serviceTier: "default", changed: true });
+  const s = await env.run(["send", "tier1", "FAST tier two"]);
+  assert.match(s.stdout, /started new turn/);
+  const nextTurn = env.daemon.state.requests.filter((q) => q.method === "turn/start").at(-1);
+  assert.equal(nextTurn.params.serviceTier, "default");
+  const shown = await env.run(["tier", "tier1"]);
+  assert.match(shown.stdout, /service tier default/);
+  await env.run(["wait", "tier1", "--timeout", "10"]);
+});
+
+test("an agent without a tier sends none, leaving the daemon default", async () => {
+  await start("tier0", "FAST no tier");
+  const threadReq = env.daemon.state.requests.filter((q) => q.method === "thread/start").at(-1);
+  assert.equal("serviceTier" in threadReq.params, false);
+  const turn = env.daemon.state.requests.filter((q) => q.method === "turn/start").at(-1);
+  assert.equal("serviceTier" in turn.params, false);
+  await env.run(["wait", "tier0", "--timeout", "10"]);
+});
+
 test("concurrent sends: one starts the turn, the other steers it", async () => {
   await start("c1", "FAST c1");
   await env.run(["wait", "c1"]);

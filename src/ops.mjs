@@ -26,6 +26,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const SANDBOXES = ["read-only", "workspace-write"];
 export const APPROVALS = ["never", "on-request"];
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+/** Friendly names for service tiers; any other id is passed through to the daemon as-is. */
+const TIER_ALIASES = { fast: "priority", standard: "default", off: "default" };
+export function normalizeTier(tier) {
+  if (tier == null) return null;
+  const t = String(tier).trim().toLowerCase();
+  if (!t) throw new UsageError("empty service tier");
+  return TIER_ALIASES[t] ?? t;
+}
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 let daemonNote = null;
@@ -164,6 +172,7 @@ function turnOverrides(a) {
   const o = { cwd: a.cwd, approvalPolicy: a.approval, sandboxPolicy: sandboxPolicy(a) };
   if (a.model) o.model = a.model;
   if (a.effort) o.effort = a.effort;
+  if (a.serviceTier) o.serviceTier = a.serviceTier;
   return o;
 }
 
@@ -192,6 +201,7 @@ export async function startAgent(o) {
     writableRoots: (o.writableRoots ?? []).map((d) => path.resolve(d)),
     network: !!o.network,
     approval: o.approval ?? "never",
+    serviceTier: normalizeTier(o.serviceTier),
   };
   if (getAgent(o.name)) {
     throw new UsageError(`agent "${o.name}" already exists (thread ${getAgent(o.name).threadId}); use send, or rm it first`);
@@ -202,6 +212,7 @@ export async function startAgent(o) {
       "thread/start",
       {
         ...(settings.model ? { model: settings.model } : {}),
+        ...(settings.serviceTier ? { serviceTier: settings.serviceTier } : {}),
         cwd: settings.cwd,
         approvalPolicy: settings.approval,
         sandbox: settings.sandbox,
@@ -214,6 +225,7 @@ export async function startAgent(o) {
     // Record what the daemon really applied (defaults resolved).
     settings.model = t.model ?? settings.model;
     settings.effort = t.reasoningEffort ?? settings.effort;
+    settings.serviceTier = t.serviceTier ?? settings.serviceTier;
     const record = {
       name: o.name,
       threadId,
@@ -293,6 +305,7 @@ function pickSettings(a) {
   return {
     model: a.model,
     effort: a.effort,
+    serviceTier: a.serviceTier ?? null,
     cwd: a.cwd,
     sandbox: a.sandbox,
     writableRoots: a.writableRoots,
@@ -360,6 +373,7 @@ export async function sendMessage(name, text) {
               approvalPolicy: a.approval,
               sandbox: a.sandbox,
               ...(a.model ? { model: a.model } : {}),
+              ...(a.serviceTier ? { serviceTier: a.serviceTier } : {}),
               config: threadConfig(a),
             },
             { timeoutMs: 60000 },
@@ -395,7 +409,12 @@ export async function sendMessage(name, text) {
           }
         }
         // idle / systemError: start a new turn
-        const params = { threadId: a.threadId, input: textInput(text), ...(reloaded ? turnOverrides(a) : {}) };
+        const params = {
+          threadId: a.threadId,
+          input: textInput(text),
+          ...(reloaded ? turnOverrides(a) : {}),
+          ...(a.serviceTier ? { serviceTier: a.serviceTier } : {}),
+        };
         const before = (await bridge.recentTurns(a.threadId, 1))[0];
         let r;
         try {
@@ -414,6 +433,17 @@ export async function sendMessage(name, text) {
       throw new Error("could not deliver the message: the agent kept changing state; try again");
     }),
   );
+}
+
+// ---- service tier ---------------------------------------------------------
+
+/** Show or set an agent's service tier. A new tier applies from the agent's next new turn. */
+export async function setTier(name, tier = null) {
+  const agent = requireAgent(name);
+  if (tier == null) return { name, serviceTier: agent.serviceTier ?? null, changed: false };
+  const serviceTier = normalizeTier(tier);
+  await patchAgent(name, { serviceTier });
+  return { name, serviceTier, changed: true };
 }
 
 // ---- log ----------------------------------------------------------------
@@ -740,6 +770,7 @@ export async function resumeAgent(name) {
         approvalPolicy: agent.approval,
         sandbox: agent.sandbox,
         ...(agent.model ? { model: agent.model } : {}),
+        ...(agent.serviceTier ? { serviceTier: agent.serviceTier } : {}),
         config: threadConfig(agent),
       },
       { timeoutMs: 60000 },
