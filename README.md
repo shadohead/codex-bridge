@@ -37,7 +37,7 @@ The exit code says what happened, the output says why.
 
 | command | what it does |
 | --- | --- |
-| `start --name NAME [--model M] [--effort low\|medium\|high\|xhigh] [--cwd DIR] [--sandbox read-only\|workspace-write] [--writable-root DIR ...] [--network] [--approval never\|on-request] [--auto-approve REGEX ...] [--auto-approve-files REGEX ...] (PROMPT \| --prompt-file F \| -)` | Creates a thread named NAME, starts its first turn, returns immediately with the thread id. Defaults: workspace-write sandbox, approval `never`, model and effort from your Codex config. |
+| `start --name NAME [--model M] [--effort low\|medium\|high\|xhigh] [--cwd DIR] [--sandbox read-only\|workspace-write] [--writable-root DIR ...] [--network] [--approval never\|on-request] [--auto-approve REGEX ...] [--auto-approve-files REGEX ...] [--fast \| --service-tier ID] (PROMPT \| --prompt-file F \| -)` | Creates a thread named NAME, starts its first turn, returns immediately with the thread id. Defaults: workspace-write sandbox, approval `never`, model, effort and service tier from your Codex config. |
 | `send NAME (MESSAGE \| --file F \| -)` | If a turn is running the message is steered into it (`turn/steer`). Otherwise a new turn starts. Returns immediately. Use `--` before a message that starts with dashes. |
 | `status [NAME]` | Without NAME a table of all agents. With NAME: state, turn elapsed time, thread and settings, token usage, the last items (commands with exit codes, patched files, agent messages), the in-flight command when a `wait` is attached, and any pending approval. |
 | `log NAME [--since CURSOR] [--full]` | Transcript events (turns, messages, commands, patches). Prints a cursor at the end; pass it as `--since` to see only newer events. `--full` shows complete messages, command output and diffs. |
@@ -47,6 +47,7 @@ The exit code says what happened, the output says why.
 | `auto NAME add REGEX [--files]` | Adds a command rule, or a file path rule with `--files`. |
 | `auto NAME rm REGEX [--files]` | Removes the exact rule. |
 | `auto NAME list` | Lists both sets of rules. |
+| `tier NAME [fast\|standard\|ID]` | Shows the agent's service tier, or sets it from its next new turn. |
 | `interrupt NAME` | Stops the running turn and waits until it has really stopped. Idempotent. |
 | `resume NAME` | Reloads the thread on the daemon after a restart (settings from the registry are re-applied). `send` does this automatically. |
 | `list` | Registered agents. |
@@ -64,6 +65,11 @@ An unmatched request still exits with code 3.
 MCP elicitations, permission requests, and `request_user_input` are never auto-approved.
 Use `codexctl status NAME` for recent automatic approvals and `codexctl log NAME` for the recorded list.
 For example, `codexctl start --name builder --approval on-request --auto-approve 'blender.*--background' --auto-approve-files '^/tmp/build/' 'Build the model.'` stores both rules with the agent.
+
+Fast mode is a service tier: `codex debug models` (or the daemon's `model/list`) shows each model's tiers, and for current models "Fast" is the `priority` tier.
+`start --fast` (the same as `--service-tier priority`) sends the tier with `thread/start` and with every new `turn/start`, so it also survives a daemon reload.
+`tier NAME fast` switches an existing agent from its next new turn, and `tier NAME standard` (the daemon's `default`) switches it back; a turn that is already running keeps its tier.
+`status` shows `/fast` after the model and effort.
 
 ### `wait` exit codes
 
@@ -353,7 +359,7 @@ THREAD                                NAME   STATUS  REGISTERED AS  CWD
 [exit 0]
 
 $ codexctl daemon status
-daemon running  socket /Users/mingj/.codex/app-server-control/app-server-control.sock  loaded threads: 2  pid 26175 (started by codexctl)
+daemon running  socket ~/.codex/app-server-control/app-server-control.sock  loaded threads: 2  pid 26175 (started by codexctl)
 [exit 0]
 
 
